@@ -239,6 +239,10 @@ void AVLTree::collect_pairs_rec(Node* n,
 }
 
 bool AVLTree::save(const std::string& path) const {
+    // Refuse to serialize if node count exceeds what the uint32_t header
+    // field can represent — writing a truncated count would corrupt the file.
+    if (count_ > UINT32_MAX) return false;
+
     std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
     if (!ofs) return false;
 
@@ -262,6 +266,19 @@ bool AVLTree::load(const std::string& path) {
     uint32_t n = 0;
     ifs.read(reinterpret_cast<char*>(&n), sizeof(n));
     if (!ifs) return false;
+
+    // Pre-flight sanity check: each entry requires at least 8 bytes
+    // (two uint32_t length fields, even for empty strings). If the
+    // remaining file is too small for the claimed entry count, the
+    // header is lying — abort before driving allocations.
+    std::streampos hdr_end = ifs.tellg();
+    ifs.seekg(0, std::ios::end);
+    std::streampos file_end = ifs.tellg();
+    ifs.seekg(hdr_end, std::ios::beg);
+
+    if (file_end < hdr_end) return false;
+    uint64_t remaining = static_cast<uint64_t>(file_end - hdr_end);
+    if (static_cast<uint64_t>(n) * 8 > remaining) return false;
 
     clear();
     for (uint32_t i = 0; i < n; ++i) {

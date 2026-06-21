@@ -5,6 +5,7 @@
 #include "avl_tree.h"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -341,6 +342,82 @@ static void test_clear() {
     CHECK(!t.contains("a"));
 }
 
+// 15. Load rejects a truncated/crafted file whose header claims more
+//     entries than the file body can possibly contain.
+static void test_load_truncated_file() {
+    const std::string path = "/tmp/avl_test_truncated.bin";
+
+    // Craft a file: header says 1000 entries, but body has only 1 entry.
+    // The pre-flight check should reject it without allocating 999 nodes.
+    std::ofstream ofs(path, std::ios::binary);
+
+    uint32_t fake_count = 1000;                         // lies
+    ofs.write(reinterpret_cast<const char*>(&fake_count), sizeof(fake_count));
+
+    // Write one valid entry: key="a", val="1"
+    auto write_u32 = [&](uint32_t v) {
+        ofs.write(reinterpret_cast<const char*>(&v), sizeof(v));
+    };
+    const std::string key = "a", val = "1";
+    write_u32(static_cast<uint32_t>(key.size()));
+    ofs.write(key.data(), key.size());
+    write_u32(static_cast<uint32_t>(val.size()));
+    ofs.write(val.data(), val.size());
+    ofs.close();
+
+    // Load must fail, tree must remain empty
+    AVLTree t;
+    CHECK(!t.load(path));
+    CHECK(t.empty());
+    CHECK(t.size() == 0);
+
+    // Extra: also test a header-only file (count > 0, no body at all)
+    std::ofstream ofs2(path, std::ios::binary);
+    fake_count = 10;
+    ofs2.write(reinterpret_cast<const char*>(&fake_count), sizeof(fake_count));
+    ofs2.close();
+
+    CHECK(!t.load(path));
+    CHECK(t.empty());
+
+    std::remove(path.c_str());
+}
+
+// 16. Load rejects a file with a single zero-length body where the
+//     header claims 2+ entries — tests the boundary of the size check.
+static void test_load_size_check_boundary() {
+    const std::string path = "/tmp/avl_test_boundary.bin";
+
+    // Header claims 2 entries (needs >= 16 bytes of body), but body
+    // is only 8 bytes (exactly one empty/empty entry).
+    std::ofstream ofs(path, std::ios::binary);
+    uint32_t count = 2;
+    ofs.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    // One entry: key_len=0, val_len=0  (8 bytes total)
+    uint32_t zero = 0;
+    ofs.write(reinterpret_cast<const char*>(&zero), sizeof(zero));  // key_len
+    ofs.write(reinterpret_cast<const char*>(&zero), sizeof(zero));  // val_len
+    ofs.close();
+
+    AVLTree t;
+    CHECK(!t.load(path));
+    CHECK(t.empty());
+
+    // But if header claims 1 entry with 8 bytes of body — that's valid
+    std::ofstream ofs2(path, std::ios::binary);
+    count = 1;
+    ofs2.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    ofs2.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+    ofs2.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+    ofs2.close();
+
+    CHECK(t.load(path));
+    CHECK(t.size() == 1);
+    CHECK(t.contains(""));
+
+    std::remove(path.c_str());
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -364,6 +441,8 @@ int main() {
     RUN_TEST(test_load_nonexistent);
     RUN_TEST(test_delete_all);
     RUN_TEST(test_clear);
+    RUN_TEST(test_load_truncated_file);
+    RUN_TEST(test_load_size_check_boundary);
 
     std::printf("========================================\n");
     std::printf(" Results: %d/%d passed\n", g_tests_passed, g_tests_run);
